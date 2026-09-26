@@ -48,6 +48,16 @@ CUDA_VISIBLE_DEVICES=0 python benchmarks/shape777_reranker.py \
   --output shape777-reranker-run.json
 ```
 
+Measure planned `--mode auto` scoring (shuffled input) against fresh and parallel shared scoring; add `--skip-fresh` to omit the ~6 minute fresh pass:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python benchmarks/shape777_auto.py \
+  --model Qwen/Qwen3.5-4B \
+  --revision 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a \
+  --input benchmarks/data/shape777.jsonl \
+  --output shape777-auto-run.json
+```
+
 The 6.7 MB fixture is project-authored and has SHA-256 `8dcf414b12fc2684e3c4ca5f3ebfd3f525f5346fec4a9bc67eb65138101f55f1`. Both runners write aggregate timings and row-level predictions.
 
 ## Quality evidence

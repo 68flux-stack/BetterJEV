@@ -14,6 +14,8 @@ from semif_phase1.cli import main
 
 @pytest.mark.parametrize("extra,message", [
     (["--backend", "mlx", "--mode", "reranker"], "reranker requires torch"),
+    (["--backend", "mlx", "--mode", "auto"], "auto mode requires --backend torch"),
+    (["--mode", "auto", "--max-batch-rows", "0"], "must be positive"),
     (["--mode", "direct", "--mlx-bits", "4"], "requires --backend mlx"),
     (["--mode", "direct", "--mlx-cache-limit-mib", "0"], "requires --backend mlx"),
     (["--mode", "direct", "--backend", "mlx", "--mlx-cache-limit-mib", "-1"], "must be nonnegative"),
@@ -97,6 +99,8 @@ def backends(monkeypatch):
         score_shared=Mock(return_value=(results, timing)),
         SerialPrefixScorer=Mock(return_value=SimpleNamespace(score=Mock(side_effect=results))),
         reranker_score=Mock(side_effect=results),
+        # Planned units can finish out of input order.
+        iter_planned=Mock(return_value=iter([(1, results[1]), (0, results[0])])),
     )
     for name, mock in vars(torch).items():
         monkeypatch.setattr(cli, name, mock)
@@ -120,6 +124,14 @@ def test_mlx_routes_to_matching_scorer(run_cli, backends, mode):
         {**result, "shared_timing": backends.timing} for result in backends.results
     ]
     assert [json.loads(line) for line in run_cli.output.read_text().splitlines()] == expected
+
+
+def test_torch_auto_writes_results_in_input_order(run_cli, backends):
+    run_cli.run("auto", "--max-batch-rows", "4")
+    model, tokenizer, metadata = backends.loaded
+    backends.torch.iter_planned.assert_called_once_with(
+        model, tokenizer, run_cli.rows, metadata, 128, max_batch_tokens=8192, max_batch_rows=4)
+    assert [json.loads(line) for line in run_cli.output.read_text().splitlines()] == backends.results
 
 
 @pytest.mark.parametrize("flags", [[], ["--device", "auto"], ["--device", "cuda"]])

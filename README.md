@@ -83,6 +83,8 @@ Each result contains typed option scores, timing, the exact model revision, and 
 
 If every row has the same exact state, switch to `--mode shared` to prefill it once and evaluate the criteria in parallel.
 
+For any mix of states, `--mode auto` tokenizes each row once, prefills every state's exact shared token prefix once, and batches the rest; each decision still sees exactly its own prompt tokens. Its CUDA speed is not yet measured; see [Performance](docs/PERFORMANCE.md) for the time budget, the projection, and the benchmark command.
+
 ## How it works
 
 ```mermaid
@@ -191,6 +193,7 @@ Returned probabilities are conditional on the supplied options. Calibrate and va
 - [Reproduce](docs/REPRODUCE.md) — exact environment, pinned commands, perturbations, and verification
 - [Apple Silicon](docs/APPLE_SILICON.md) — MPS and optional MLX backends
 - [Calibration](docs/CALIBRATION.md) — fitted temperatures, out-of-fold evidence, and application
+- [Performance](docs/PERFORMANCE.md) — where scoring time goes, planned `auto` mode, and optional CUDA kernels
 - [EXL3 bridge](exl3-bridge/README.md) — quantized 27B runner and committed evidence
 - [Interactive replay](demo/index.html)
 - [Browser-only WebGPU demo](webgpu-demo/index.html) — no waitlist; use it today

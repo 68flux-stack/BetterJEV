@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import math
 import re
+import sys
+from importlib import metadata as distributions
 from pathlib import Path
 
 LETTERS = "ABCDEFGHIJKLMNOP"
@@ -96,6 +99,29 @@ def synchronize(device) -> None:
         torch.mps.synchronize()
 
 
+# Optional CUDA kernels that Transformers substitutes for its reference PyTorch paths when importable,
+# keyed by (import name, distribution, reference function they replace in a modeling module).
+OPTIONAL_KERNELS = (
+    ("fla", "flash-linear-attention", "torch_chunk_gated_delta_rule"),
+    ("causal_conv1d", "causal-conv1d", "causal_conv1d_fn"),
+)
+
+
+def active_kernels(model) -> dict:
+    """Report which optional kernel packages this model's modeling code will dispatch to."""
+    module = sys.modules.get(type(model).__module__)
+    active = {}
+    for name, distribution, reference in OPTIONAL_KERNELS:
+        if module is None or not hasattr(module, reference):
+            continue
+        try:
+            importlib.import_module(name)
+            active[distribution] = distributions.version(distribution)
+        except Exception:
+            active[distribution] = None
+    return active
+
+
 def load_causal_model(source: str, revision: str, device: str = "auto", dtype: str = "bfloat16"):
     """Load one pinned causal model on the resolved Torch device."""
     import torch
@@ -130,6 +156,9 @@ def load_causal_model(source: str, revision: str, device: str = "auto", dtype: s
     if any(loading.get(key) for key in ("missing_keys", "mismatched_keys", "error_msgs")):
         raise RuntimeError(f"Checkpoint did not load completely: {loading}")
     model.eval()
+    kernels = active_kernels(model)
+    if not str(target).startswith("cuda") and any(kernels.values()):
+        raise ValueError(f"Installed CUDA-only kernels {kernels} would run on {target}; use an environment without them")
     metadata = {
         "source": source,
         "revision": revision,
@@ -137,5 +166,6 @@ def load_causal_model(source: str, revision: str, device: str = "auto", dtype: s
         "device": str(target),
         "torch_version": torch.__version__,
         "transformers_version": transformers.__version__,
+        "optional_kernels": kernels,
     }
     return model, tokenizer, metadata
