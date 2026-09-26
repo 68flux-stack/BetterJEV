@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .core import load_causal_model, validate_row
 from .direct import score as direct_score
+from .engine import iter_planned
 from .reranker import score as reranker_score
 from .serial import SerialPrefixScorer
 from .shared import score_shared
@@ -15,7 +16,8 @@ from .shared import score_shared
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("direct", "serial", "shared", "reranker"), required=True)
+    parser.add_argument("--mode", choices=("direct", "serial", "shared", "auto", "reranker"), required=True,
+                        help="auto plans any input: one prefill per shared state prefix, batched suffixes")
     parser.add_argument("--backend", choices=("torch", "mlx", "llamacpp"), default="torch")
     parser.add_argument("--mlx-bits", type=int, choices=(4, 8), help="Quantize MLX weights in memory; default preserves source precision")
     parser.add_argument("--mlx-cache-limit-mib", type=int,
@@ -32,9 +34,17 @@ def main() -> None:
                         help="Torch device (auto prefers CUDA, then Apple MPS; CPU must be explicit)")
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16",
                         help="Model precision; changing it can change option scores")
+    parser.add_argument("--max-batch-tokens", type=int, default=8192,
+                        help="auto mode: padded tokens per batched forward")
+    parser.add_argument("--max-batch-rows", type=int, default=32,
+                        help="auto mode: decisions per batched forward (1 disables batching)")
     args = parser.parse_args()
     if args.output.exists() or args.max_tokens < 1:
         parser.error("Output must be new and max-tokens must be positive")
+    if args.max_batch_tokens < 1 or args.max_batch_rows < 1:
+        parser.error("--max-batch-tokens and --max-batch-rows must be positive")
+    if args.mode == "auto" and args.backend != "torch":
+        parser.error("auto mode requires --backend torch")
     if args.mlx_bits and args.backend != "mlx":
         parser.error("--mlx-bits requires --backend mlx")
     if args.mlx_cache_limit_mib is not None:
@@ -87,7 +97,18 @@ def main() -> None:
         model, tokenizer, metadata = load_causal_model(args.model, args.revision, args.device, args.dtype)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x") as destination:
-        if args.mode == "shared":
+        if args.mode == "auto":
+            # Units finish out of input order; write each result once all earlier rows are done.
+            pending, cursor = {}, 0
+            for index, result in iter_planned(model, tokenizer, rows, metadata, args.max_tokens,
+                                              max_batch_tokens=args.max_batch_tokens,
+                                              max_batch_rows=args.max_batch_rows):
+                pending[index] = result
+                while cursor in pending:
+                    destination.write(json.dumps(pending.pop(cursor), allow_nan=False) + "\n")
+                    cursor += 1
+                destination.flush()
+        elif args.mode == "shared":
             results, timing = shared(model, tokenizer, rows, metadata, args.max_tokens)
             for result in results:
                 destination.write(json.dumps({**result, "shared_timing": timing}, allow_nan=False) + "\n")

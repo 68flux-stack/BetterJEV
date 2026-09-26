@@ -36,7 +36,7 @@ CUDA_VISIBLE_DEVICES=0 semif-score --mode reranker \
   --input examples/decisions.jsonl --output results-reranker.jsonl
 ```
 
-The command refuses an existing output path and refuses silent input truncation. Each output embeds the exact revision, library versions, prompt hash, token count, timings, and an explicit probability-status warning. State may be a nonempty string, JSON object, or JSON array. `serial` caches consecutive equal states. `shared` requires every input row to carry the same exact state and is exercised by the 37×21 runner below.
+The command refuses an existing output path and refuses silent input truncation. Each output embeds the exact revision, library versions, prompt hash, token count, timings, and an explicit probability-status warning. State may be a nonempty string, JSON object, or JSON array. `serial` caches consecutive equal states. `shared` requires every input row to carry the same exact state and is exercised by the 37×21 runner below. `auto` accepts any mix of states, shares each state's exact token prefix, and batches the remaining rows; see [PERFORMANCE.md](PERFORMANCE.md).
 
 ## Third-party evaluations
 

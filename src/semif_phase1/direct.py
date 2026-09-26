@@ -4,13 +4,29 @@ from __future__ import annotations
 
 import inspect
 import time
+import weakref
 
 from .core import LETTERS, digest, direct_messages, softmax, synchronize
 
 PROMPT_VERSION = "direct-options-v1"
 
+# Per-tokenizer memo of verified answer boundaries; see _boundary_tail for why reuse is exact.
+_MEMOS = weakref.WeakKeyDictionary()
+# Only short template tails are memoized, so row content never accumulates in the memo.
+_MAX_MEMO_TAIL = 256
+
+
+def _memo(tokenizer) -> dict | None:
+    try:
+        return _MEMOS.setdefault(tokenizer, {})
+    except TypeError:
+        return None
+
 
 def _slot_ids(tokenizer, count: int) -> list[int]:
+    memo = _memo(tokenizer)
+    if memo is not None and ("slots", count) in memo:
+        return list(memo[("slots", count)])
     result = []
     for letter in LETTERS[:count]:
         encoded = tokenizer.encode(letter, add_special_tokens=False)
@@ -19,6 +35,8 @@ def _slot_ids(tokenizer, count: int) -> list[int]:
         result.append(encoded[0])
     if len(result) != len(set(result)):
         raise ValueError("Answer-slot tokens collide")
+    if memo is not None:
+        memo[("slots", count)] = list(result)
     return result
 
 
@@ -30,19 +48,66 @@ def _forward(model, inputs):
     return model(**kwargs).logits[:, -1, :]
 
 
-def encode_prompt(tokenizer, row: dict, max_tokens: int) -> tuple[list[int], list[int], str]:
-    """Encode one decision and verify its single-token answer slots."""
-    prompt = tokenizer.apply_chat_template(
+def _render(tokenizer, row: dict) -> str:
+    return tokenizer.apply_chat_template(
         direct_messages(row), tokenize=False, add_generation_prompt=True, enable_thinking=False
     )
-    ids = tokenizer.encode(prompt, add_special_tokens=False)
+
+
+def _boundary_tail(tokenizer, prompt: str, ids: list[int], offsets) -> str | None:
+    """Return the prompt text from its last added token onward, when that alone decides the boundary.
+
+    Fast tokenizers split out added tokens before normalizing, pre-tokenizing and merging each
+    remaining segment independently. Appending a letter that no added token contains therefore
+    changes only the final segment, so the boundary check depends only on this tail.
+    """
+    if offsets is None or not getattr(tokenizer, "is_fast", False):
+        return None
+    added = {index: text for text, index in tokenizer.get_added_vocab().items()}
+    for position in range(len(ids) - 1, -1, -1):
+        if ids[position] in added:
+            start = offsets[position][0]
+            tail = prompt[start:]
+            return tail if prompt.startswith(added[ids[position]], start) and len(tail) <= _MAX_MEMO_TAIL else None
+    return None
+
+
+def _verify_encoding(tokenizer, row: dict, prompt: str, ids: list[int], offsets, max_tokens: int):
     if not ids or len(ids) > max_tokens:
         raise ValueError(f"Row {row['id']}: {len(ids)} input tokens exceed limit {max_tokens}; no truncation allowed")
     slots = _slot_ids(tokenizer, len(row["options"]))
+    memo = _memo(tokenizer)
+    tail = _boundary_tail(tokenizer, prompt, ids, offsets) if memo is not None else None
+    added = "".join(tokenizer.get_added_vocab()) if tail is not None else ""
     for letter, token in zip(LETTERS, slots):
+        key = ("boundary", tail, letter, token)
+        if tail is not None and letter not in added and key in memo:
+            continue
         if tokenizer.encode(prompt + letter, add_special_tokens=False) != ids + [token]:
             raise ValueError(f"Answer boundary changes tokenization for slot {letter}")
+        if tail is not None and letter not in added:
+            memo[key] = True
     return ids, slots, digest(prompt)
+
+
+def encode_prompt(tokenizer, row: dict, max_tokens: int) -> tuple[list[int], list[int], str]:
+    """Encode one decision and verify its single-token answer slots."""
+    return encode_prompts(tokenizer, [row], max_tokens)[0]
+
+
+def encode_prompts(tokenizer, rows: list[dict], max_tokens: int) -> list[tuple[list[int], list[int], str]]:
+    """Encode decisions with one tokenizer pass each, batched when the tokenizer supports it."""
+    prompts = [_render(tokenizer, row) for row in rows]
+    # Wrappers (for example MLX-LM's) may forward is_fast without being callable themselves.
+    if callable(tokenizer) and getattr(tokenizer, "is_fast", False) is True:
+        batch = tokenizer(prompts, add_special_tokens=False, return_offsets_mapping=True)
+        encodings = zip(batch["input_ids"], batch["offset_mapping"])
+    else:
+        encodings = ((tokenizer.encode(prompt, add_special_tokens=False), None) for prompt in prompts)
+    return [
+        _verify_encoding(tokenizer, row, prompt, list(ids), offsets, max_tokens)
+        for row, prompt, (ids, offsets) in zip(rows, prompts, encodings)
+    ]
 
 
 def score(model, tokenizer, row: dict, metadata: dict, max_tokens: int = 4096) -> dict:
